@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Emergency Response Center</title>
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/response_static/css/response.css">
+</head>
+<body>
+
+    <!-- Ambient background orbs -->
+    <div class="bg-orb orb-1"></div>
+    <div class="bg-orb orb-2"></div>
+    <div class="bg-orb orb-3"></div>
+
+    <div class="page-wrapper">
+
+        <!-- Header -->
+        <header class="main-header">
+            <div class="header-left">
+                <div class="logo-pulse"></div>
+                <div>
+                    <h1>Response Center</h1>
+                    <p class="header-sub">Emergency Alert Distribution System</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-indicator" id="connectionStatus">
+                    <span class="dot offline"></span>
+                    <span>Offline</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- ── STEP 1: Select or Register ─────────────────────────────────────── -->
+        <div class="card" id="selectCard">
+            <div class="card-icon">🏥</div>
+            <h2>Select Your Help Center</h2>
+            <p class="card-desc">Choose your registered help center to receive emergency alerts for your area.</p>
+
+            <div class="select-wrapper">
+                <select id="centerSelect" class="select-input">
+                    <option value="">— Select Help Center —</option>
+                </select>
+                <span class="select-arrow">▾</span>
+            </div>
+
+            <button class="btn-primary glow-btn" id="enableNotifBtn" style="display:none;" onclick="enableNotifications()">
+                <span class="btn-icon">🔔</span>
+                Enable Notifications
+            </button>
+
+            <p id="notifStatus" class="status-text"></p>
+
+            <div class="divider-line">
+                <span>or</span>
+            </div>
+
+            <button class="btn-secondary" onclick="showRegister()">
+                ➕ Not registered? Register Now
+            </button>
+        </div>
+
+        <!-- ── STEP 2: Registration Form ─────────────────────────────────────── -->
+        <div class="card slide-in" id="registerCard" style="display:none;">
+            <div class="card-icon">📋</div>
+            <h2>Register Help Center</h2>
+            <p class="card-desc">Enter your center's details. Alerts will be matched to your location.</p>
+
+            <div class="form-group">
+                <label class="form-label">Center Name</label>
+                <input type="text" id="regName" placeholder="e.g. City General Hospital" class="form-input">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Location <span class="label-hint">(city / area)</span></label>
+                <input type="text" id="regLocation" placeholder="e.g. Downtown Chicago" class="form-input">
+            </div>
+            <div class="form-group">
+                <label class="form-label">State</label>
+                <input type="text" id="regState" placeholder="e.g. Illinois" class="form-input">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Center Type</label>
+                <div class="select-wrapper">
+                    <select id="regType" class="form-input">
+                        <option value="Hospital">🏥 Hospital</option>
+                        <option value="Police Station">🚓 Police Station</option>
+                        <option value="Fire Station">🚒 Fire Station</option>
+                        <option value="Clinic">🏨 Clinic</option>
+                        <option value="General">🏢 General Emergency Center</option>
+                    </select>
+                    <span class="select-arrow">▾</span>
+                </div>
+            </div>
+
+            <button class="btn-primary" onclick="registerCenter()">Register Center</button>
+            <button class="btn-link" onclick="hideRegister()">← Back to selection</button>
+            <p id="regStatus" class="status-text"></p>
+        </div>
+
+        <!-- ── Dashboard (shown after enabling notifications) ─────────────────── -->
+        <div id="dashboard" style="display:none;">
+
+            <!-- Active center card -->
+            <div class="card active-card">
+                <div class="active-header">
+                    <div class="active-pulse-ring">
+                        <div class="active-pulse-dot"></div>
+                    </div>
+                    <div>
+                        <p class="active-label">ACTIVE CENTER</p>
+                        <h2 id="activeCenterName">—</h2>
+                        <p class="active-meta" id="activeCenterMeta">—</p>
+                    </div>
+                    <div class="notif-badge">
+                        <span>🔔</span>
+                        <span>Notifications ON</span>
+                    </div>
+                </div>
+                <button class="btn-change" onclick="changeCenterView()">Change Center</button>
+            </div>
+
+            <!-- Recent alerts list -->
+            <div class="card">
+                <div class="alerts-header-row">
+                    <h2>📊 Incoming Alerts</h2>
+                    <button class="btn-refresh" onclick="loadAlerts()">↻ Refresh</button>
+                </div>
+                <div id="alertsList">
+                    <div class="no-alerts">
+                        <div class="no-alerts-icon">📭</div>
+                        <p>No alerts received yet.</p>
+                        <p class="no-alerts-sub">Alerts from the Emergency App will appear here automatically.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- /dashboard -->
+
+    </div><!-- /page-wrapper -->
+
+    <!-- ── Emergency Alert Modal ─────────────────────────────────────────────── -->
+    <div id="alertModal" class="alert-modal" style="display:none;" onclick="dismissAlert(event)">
+        <div class="alert-modal-content">
+            <div class="modal-siren">🚨</div>
+            <div class="modal-priority-badge" id="modalPriorityBadge">CRITICAL</div>
+            <h2 id="modalTitle">Emergency Alert</h2>
+            <div id="modalBody" class="modal-body"></div>
+            <button class="btn-primary modal-ack-btn" onclick="dismissAlertBtn()">
+                ✔ Acknowledge Alert
+            </button>
+        </div>
+    </div>
+
+    <!-- Pass VAPID key from server to JS -->
+    <script>
+        const VAPID_PUBLIC_KEY = "{{ vapid_public_key }}";
+    </script>
+    <script src="/response_static/js/response.js"></script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Emergency Call Center Assistant</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="page-wrapper">
+        <div class="container">
+
+            <!-- Header -->
+            <header class="main-header">
+                <div class="header-icon">🚨</div>
+                <h1>AI Emergency Call Intelligence And Response Optimization System</h1>
+                <div class="header-divider"></div>
+            </header>
+
+            <!-- Dashboard Grid -->
+            <div class="dashboard">
+
+                <!-- Left Panel: Upload -->
+                <div class="panel upload-panel">
+                    <div class="panel-header">
+                        <span class="panel-icon">📁</span>
+                        <h2>Upload Audio Files</h2>
+                    </div>
+
+                    <div class="drop-zone" id="dropZone">
+                        <div class="drop-zone-inner">
+                            <div class="folder-icon">📂</div>
+                            <p class="drop-title">Drag &amp; Drop Audio Files Here</p>
+                            <p class="drop-or">or</p>
+                            <button class="btn-browse" id="browseBtn">Browse Files</button>
+                            <p class="supported-formats">Supported: MP3, WAV, M4A, OGG, FLAC, WEBM</p>
+                        </div>
+                        <input type="file" id="fileInput" multiple accept="audio/*" style="display:none;">
+                    </div>
+
+                    <div id="fileList" class="file-list"></div>
+                    <div id="uploadStatus" class="status-message"></div>
+                </div>
+
+                <!-- Right Panel: Record -->
+                <div class="panel record-panel">
+                    <div class="panel-header">
+                        <span class="panel-icon">🎙</span>
+                        <h2>Record Voice Live</h2>
+                    </div>
+
+                    <div class="record-center">
+                        <button class="btn-record" id="recordBtn">
+                            <span class="record-dot" id="recordDot"></span>
+                            <span id="recordBtnText">Record Now</span>
+                        </button>
+                        <div id="recordingTimer" class="timer" style="display:none;">00:00</div>
+                    </div>
+
+                    <div class="record-info-box">
+                        <p id="recordingStatus">Click "Record Now" to start capturing audio</p>
+                        <p class="record-sub">Your recording will be automatically analyzed</p>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Results Section -->
+            <div id="resultsSection" class="results-section" style="display:none;">
+                <div class="results-header">
+                    <h2>📊 Analysis Results</h2>
+                    <p class="results-note">Calls are automatically prioritized by emergency level and urgency. Maps appear below calls with location data.</p>
+                </div>
+                <div id="resultsContainer" class="results-container"></div>
+            </div>
+
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
