@@ -1,7 +1,7 @@
 🚨 AI Emergency Call Intelligence And Response Optimization System
-An AI-powered platform that transcribes emergency audio, detects caller emotion, extracts incident details, maps locations, and sends real-time alerts to response centers for dispatching services.
+An AI-powered platform that transcribes emergency audio, detects caller emotion, extracts incident details, maps locations, and sends real-time alerts to response centers.
 
-Features
+✅ Features
 
 🎙️ Live voice recording + audio file upload (MP3, WAV, M4A, OGG, FLAC, WEBM)
 🤖 Auto transcription using OpenAI Whisper
@@ -12,34 +12,36 @@ Features
 🗄️ PostgreSQL database for persistent storage
 
 
-Tech Stack
+🛠️ Tech Stack
 Python, Flask, OpenAI Whisper, SpaCy, Librosa, Google Maps API, PostgreSQL, Leaflet.js, VAPID Web Push
 
-Setup
-1. Install dependencies
+⚙️ Setup
+1. Install Dependencies
 bashpip install -r requirements.txt
 pip install -r requirements_response.txt
 pip install python-dotenv
 python -m spacy download en_core_web_sm
-2. Create a .env file in the project root
+2. Create a .env File in the Project Root
 PG_DB=emergency_response
 PG_USER=postgres
 PG_PASSWORD=yourpassword
 PG_HOST=localhost
 PG_PORT=5432
-3. Add to the top of both app.py and response_app.py
+3. Add to the Top of Both app.py and response_app.py
 pythonfrom dotenv import load_dotenv
 load_dotenv()
-4. Create the PostgreSQL database
+4. Create the PostgreSQL Database
 sqlCREATE DATABASE emergency_response;
 
 Tables are created automatically on first run.
 
 
-Running
+▶️ Running
 Open two terminals in your project folder:
-bash# Terminal 1
-python app.py
-bash# Terminal 2
-python response_app.py
+Terminal 1 — Emergency Call App
+bashpython app.py
+Terminal 2 — Response Center App
+bashpython response_app.py
+
+🌐 Access
 AppURLEmergency Call Apphttp://localhost:5006Response Centerhttp://localhost:5020
