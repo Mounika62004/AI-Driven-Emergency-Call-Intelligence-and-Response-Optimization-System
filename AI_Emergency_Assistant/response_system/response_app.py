@@ -2,6 +2,7 @@
 Emergency Response Center — Flask App on port 5020
 Receives alerts from the Emergency App (port 5006) and distributes
 Web Push notifications to registered help centers.
+Storage: PostgreSQL (replaces JSON flat files)
 """
 
 from flask import Flask, render_template, request, jsonify, send_from_directory
@@ -9,6 +10,8 @@ import json
 import os
 import base64
 from datetime import datetime
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 response_app = Flask(
     __name__,
@@ -18,29 +21,68 @@ response_app = Flask(
 )
 
 # ─── File paths ───────────────────────────────────────────────────────────────
-BASE          = os.path.dirname(os.path.abspath(__file__))
-CENTERS_FILE  = os.path.join(BASE, 'help_centers.json')
-SUBS_FILE     = os.path.join(BASE, 'push_subscriptions.json')
-ALERTS_FILE   = os.path.join(BASE, 'alerts_log.json')
-VAPID_PEM     = os.path.join(BASE, 'vapid_private.pem')
-VAPID_PUB     = os.path.join(BASE, 'vapid_public_key.txt')
-VAPID_EMAIL   = 'mailto:admin@emergency.local'
+BASE        = os.path.dirname(os.path.abspath(__file__))
+VAPID_PEM   = os.path.join(BASE, 'vapid_private.pem')
+VAPID_PUB   = os.path.join(BASE, 'vapid_public_key.txt')
+VAPID_EMAIL = 'mailto:admin@emergency.local'
+
+# ─── PostgreSQL connection config ─────────────────────────────────────────────
+# Edit these values to match your PostgreSQL setup, or set environment variables.
+DB_CONFIG = {
+    'dbname':   os.environ.get('PG_DB',       'emergency_response'),
+    'user':     os.environ.get('PG_USER',     'postgres'),
+    'password': os.environ.get('PG_PASSWORD', 'postgres'),
+    'host':     os.environ.get('PG_HOST',     'localhost'),
+    'port':     os.environ.get('PG_PORT',     '5432'),
+}
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-def load_json(path, default):
-    try:
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return default
+def get_db():
+    """Open and return a new database connection."""
+    return psycopg2.connect(**DB_CONFIG)
 
 
-def save_json(path, data):
-    with open(path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+def init_db():
+    """Create all required tables if they don't already exist."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS help_centers (
+                    id            TEXT PRIMARY KEY,
+                    name          TEXT NOT NULL UNIQUE,
+                    location      TEXT NOT NULL,
+                    state         TEXT NOT NULL,
+                    type          TEXT NOT NULL DEFAULT 'General',
+                    registered_at TEXT NOT NULL
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    id          SERIAL PRIMARY KEY,
+                    center_name TEXT NOT NULL,
+                    endpoint    TEXT NOT NULL UNIQUE,
+                    subscription JSONB NOT NULL
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS alerts_log (
+                    id              SERIAL PRIMARY KEY,
+                    title           TEXT,
+                    body            TEXT,
+                    priority        INTEGER,
+                    priority_text   TEXT,
+                    emergency_type  TEXT,
+                    location        TEXT,
+                    emotion         TEXT,
+                    transcript      TEXT,
+                    filename        TEXT,
+                    matched_centers JSONB,
+                    play_sound      BOOLEAN DEFAULT TRUE,
+                    timestamp       TEXT NOT NULL
+                );
+            """)
+        conn.commit()
+    print('✅ PostgreSQL tables verified / created.')
 
 
 # ─── VAPID key generation ─────────────────────────────────────────────────────
@@ -85,6 +127,9 @@ VAPID_PUBLIC_KEY = get_or_generate_vapid()
 SERVER_START_TIME = datetime.now().isoformat()
 print(f'🕐 Server session started at: {SERVER_START_TIME}')
 
+# ─── Initialise DB tables on startup ─────────────────────────────────────────
+init_db()
+
 
 # ─── Location matching ────────────────────────────────────────────────────────
 def location_matches(extracted_loc: str, center: dict) -> bool:
@@ -100,12 +145,9 @@ def location_matches(extracted_loc: str, center: dict) -> bool:
     center_state = center.get('state', '').lower().strip()
     combined     = f'{center_loc} {center_state}'
 
-    # Any meaningful word in extracted location found in center's fields?
     for word in loc_lower.split():
         if len(word) > 2 and word in combined:
             return True
-
-    # Any meaningful word in center's fields found in extracted location?
     for word in combined.split():
         if len(word) > 2 and word in loc_lower:
             return True
@@ -118,6 +160,7 @@ def send_push_to_center(center_name: str, payload: dict) -> int:
     """
     Send a Web Push notification to every subscribed browser for center_name.
     Returns the number of successful pushes.
+    Prunes dead subscriptions (410 / 404) from the database automatically.
     """
     try:
         from pywebpush import webpush, WebPushException
@@ -129,37 +172,48 @@ def send_push_to_center(center_name: str, payload: dict) -> int:
         print('VAPID private key missing – skipping push')
         return 0
 
-    subscriptions = load_json(SUBS_FILE, {})
-    center_subs   = subscriptions.get(center_name, [])
+    # Fetch subscriptions for this center
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, endpoint, subscription FROM push_subscriptions WHERE center_name = %s",
+                (center_name,)
+            )
+            rows = cur.fetchall()
 
-    if not center_subs:
+    if not rows:
         print(f'No push subscriptions for "{center_name}"')
         return 0
 
-    sent        = 0
-    valid_subs  = []
-    import json as _json
-    payload_str = _json.dumps(payload)
+    sent         = 0
+    dead_ids     = []
+    payload_str  = json.dumps(payload)
 
-    for sub in center_subs:
+    for row in rows:
         try:
             webpush(
-                subscription_info=sub,
+                subscription_info=dict(row['subscription']),
                 data=payload_str,
                 vapid_private_key=VAPID_PEM,
                 vapid_claims={'sub': VAPID_EMAIL}
             )
             sent += 1
-            valid_subs.append(sub)
         except Exception as e:
             err = str(e)
             print(f'Push failed: {err}')
-            if '410' not in err and '404' not in err:
-                valid_subs.append(sub)
+            if '410' in err or '404' in err:
+                dead_ids.append(row['id'])
 
     # Prune dead subscriptions
-    subscriptions[center_name] = valid_subs
-    save_json(SUBS_FILE, subscriptions)
+    if dead_ids:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM push_subscriptions WHERE id = ANY(%s)",
+                    (dead_ids,)
+                )
+            conn.commit()
+
     return sent
 
 
@@ -178,7 +232,11 @@ def index():
 
 @response_app.route('/centers', methods=['GET'])
 def get_centers():
-    return jsonify(load_json(CENTERS_FILE, []))
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM help_centers ORDER BY registered_at")
+            centers = [dict(r) for r in cur.fetchall()]
+    return jsonify(centers)
 
 
 @response_app.route('/register', methods=['POST'])
@@ -192,21 +250,24 @@ def register_center():
     if not name or not location or not state:
         return jsonify({'error': 'Name, location, and state are required'}), 400
 
-    centers = load_json(CENTERS_FILE, [])
-    for c in centers:
-        if c['name'].lower() == name.lower():
-            return jsonify({'error': 'A center with this name already exists'}), 409
+    center_id = f'center_{int(datetime.now().timestamp())}'
+    now       = datetime.now().isoformat()
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO help_centers (id, name, location, state, type, registered_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (center_id, name, location, state, ctype, now))
+            conn.commit()
+    except psycopg2.errors.UniqueViolation:
+        return jsonify({'error': 'A center with this name already exists'}), 409
 
     new_center = {
-        'id':            f'center_{len(centers)+1}_{int(datetime.now().timestamp())}',
-        'name':          name,
-        'location':      location,
-        'state':         state,
-        'type':          ctype,
-        'registered_at': datetime.now().isoformat()
+        'id': center_id, 'name': name, 'location': location,
+        'state': state, 'type': ctype, 'registered_at': now
     }
-    centers.append(new_center)
-    save_json(CENTERS_FILE, centers)
     return jsonify({'success': True, 'center': new_center})
 
 
@@ -220,12 +281,16 @@ def subscribe():
     if not center_name or not subscription:
         return jsonify({'error': 'center_name and subscription required'}), 400
 
-    subscriptions      = load_json(SUBS_FILE, {})
-    existing_endpoints = [s.get('endpoint') for s in subscriptions.get(center_name, [])]
+    endpoint = subscription.get('endpoint')
 
-    if subscription.get('endpoint') not in existing_endpoints:
-        subscriptions.setdefault(center_name, []).append(subscription)
-        save_json(SUBS_FILE, subscriptions)
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO push_subscriptions (center_name, endpoint, subscription)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (endpoint) DO NOTHING
+            """, (center_name, endpoint, json.dumps(subscription)))
+        conn.commit()
 
     return jsonify({'success': True})
 
@@ -235,7 +300,6 @@ def receive_alert():
     """
     Called by the Emergency App (port 5006) after every audio analysis.
     Matches location → registered centers → fires Web Push notifications.
-    Only sends to centers whose location matches the extracted location.
     """
     data = request.json or {}
 
@@ -250,7 +314,6 @@ def receive_alert():
     priority_labels = {1: 'CRITICAL', 2: 'HIGH', 3: 'MEDIUM', 4: 'LOW'}
     priority_text   = priority_labels.get(priority, 'MEDIUM')
 
-    # ── Build short incident report ──────────────────────────────────────────
     report = {
         'title':         f'🚨 {priority_text} Emergency — {emergency_type.title() if emergency_type else "Unknown"}',
         'body':          (
@@ -270,17 +333,34 @@ def receive_alert():
         'play_sound':     True
     }
 
-    centers = load_json(CENTERS_FILE, [])
-    matched = [c for c in centers if location_matches(extracted_location, c)]
+    # Fetch all centers and find matches
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM help_centers")
+            centers = [dict(r) for r in cur.fetchall()]
 
-    # ── Only send to matching centers, no fallback broadcast ─────────────────
-    targets = matched
+    matched  = [c for c in centers if location_matches(extracted_location, c)]
+    targets  = matched
+
+    now_iso  = datetime.now().isoformat()
 
     if not targets:
         print(f'⚠️  No matching center found for location: "{extracted_location}" — alert not sent')
-        alerts = load_json(ALERTS_FILE, [])
-        alerts.insert(0, {**report, 'matched_centers': []})
-        save_json(ALERTS_FILE, alerts[:100])
+        # Still log the alert with empty matched_centers
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO alerts_log
+                        (title, body, priority, priority_text, emergency_type,
+                         location, emotion, transcript, filename, matched_centers, play_sound, timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    report['title'], report['body'], priority, priority_text,
+                    emergency_type, extracted_location, emotion, transcript,
+                    filename, json.dumps([]), True, now_iso
+                ))
+            conn.commit()
+
         return jsonify({
             'success':            True,
             'matched_centers':    [],
@@ -297,10 +377,20 @@ def receive_alert():
         total_sent += sent
         notified_centers.append(center['name'])
 
-    # ── Persist alert log ────────────────────────────────────────────────────
-    alerts = load_json(ALERTS_FILE, [])
-    alerts.insert(0, {**report, 'matched_centers': notified_centers})
-    save_json(ALERTS_FILE, alerts[:100])
+    # Persist alert log
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO alerts_log
+                    (title, body, priority, priority_text, emergency_type,
+                     location, emotion, transcript, filename, matched_centers, play_sound, timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                report['title'], report['body'], priority, priority_text,
+                emergency_type, extracted_location, emotion, transcript,
+                filename, json.dumps(notified_centers), True, now_iso
+            ))
+        conn.commit()
 
     print(f'📢 Alert dispatched to: {notified_centers}, push sent: {total_sent}')
     return jsonify({
@@ -317,18 +407,27 @@ def receive_alert():
 def get_alerts():
     """Returns alerts from this server session only, optionally filtered by center."""
     center = request.args.get('center', '')
-    alerts = load_json(ALERTS_FILE, [])
 
-    # ── Only show alerts received after this server session started ───────────
-    alerts = [a for a in alerts if a.get('timestamp', '') >= SERVER_START_TIME]
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if center:
+                cur.execute("""
+                    SELECT * FROM alerts_log
+                    WHERE timestamp >= %s
+                      AND matched_centers @> %s::jsonb
+                    ORDER BY timestamp DESC
+                    LIMIT 20
+                """, (SERVER_START_TIME, json.dumps([center])))
+            else:
+                cur.execute("""
+                    SELECT * FROM alerts_log
+                    WHERE timestamp >= %s
+                    ORDER BY timestamp DESC
+                    LIMIT 20
+                """, (SERVER_START_TIME,))
+            alerts = [dict(r) for r in cur.fetchall()]
 
-    if center:
-        alerts = [
-            a for a in alerts
-            if center in a.get('matched_centers', [])
-        ]
-
-    return jsonify(alerts[:20])
+    return jsonify(alerts)
 
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
