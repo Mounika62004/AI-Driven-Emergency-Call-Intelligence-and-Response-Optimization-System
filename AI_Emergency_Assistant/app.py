@@ -9,23 +9,57 @@ from geomapping import get_location_data
 from datetime import datetime
 import hashlib
 import requests as http_requests   # renamed to avoid clash with flask.request
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100 MB
 
 # ===== FOLDER SETUP =====
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER   = os.path.join(BASE_DIR, 'uploads')
-RESULTS_FOLDER  = os.path.join(BASE_DIR, 'results')
+BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RESULTS_FOLDER, exist_ok=True)
-
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['RESULTS_FOLDER'] = RESULTS_FOLDER
 
 ALLOWED_EXTENSIONS = {'wav', 'mp3', 'ogg', 'flac', 'm4a', 'webm'}
 RESPONSE_APP_URL   = 'http://localhost:5020/receive_alert'
+
+# ─── PostgreSQL connection config ─────────────────────────────────────────────
+# Edit these values or set environment variables.
+DB_CONFIG = {
+    'dbname':   os.environ.get('PG_DB',       'emergency_response'),
+    'user':     os.environ.get('PG_USER',     'postgres'),
+    'password': os.environ.get('PG_PASSWORD', 'postgres'),
+    'host':     os.environ.get('PG_HOST',     'localhost'),
+    'port':     os.environ.get('PG_PORT',     '5432'),
+}
+
+
+def get_db():
+    """Open and return a new database connection."""
+    return psycopg2.connect(**DB_CONFIG)
+
+
+def init_db():
+    """Create the results_cache table if it doesn't already exist."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS results_cache (
+                    id           SERIAL PRIMARY KEY,
+                    file_hash    TEXT UNIQUE NOT NULL,
+                    filename     TEXT,
+                    result       JSONB NOT NULL,
+                    processed_at TEXT NOT NULL
+                );
+            """)
+        conn.commit()
+    print('✅ results_cache table verified / created.')
+
+
+# Initialise table on startup
+init_db()
 
 
 def allowed_file(filename):
@@ -40,30 +74,39 @@ def get_file_hash(file_stream):
     return md5.hexdigest()
 
 
-def find_existing_result(file_hash):
-    for fname in os.listdir(RESULTS_FOLDER):
-        if not fname.endswith('.json'):
-            continue
-        path = os.path.join(RESULTS_FOLDER, fname)
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if data.get('file_hash') == file_hash:
-                print(f"♻️  Duplicate — returning cached result from {fname}")
-                return data
-        except Exception:
-            continue
+def find_existing_result(file_hash: str):
+    """Return cached result dict for the given file hash, or None."""
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT result FROM results_cache WHERE file_hash = %s",
+                (file_hash,)
+            )
+            row = cur.fetchone()
+    if row:
+        print(f"♻️  Duplicate — returning cached result for hash {file_hash[:8]}...")
+        return dict(row['result'])
     return None
 
 
-def save_result_to_file(result, prefix='result'):
-    timestamp       = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    result_filename = f"{prefix}_{timestamp}.json"
-    result_path     = os.path.join(app.config['RESULTS_FOLDER'], result_filename)
-    with open(result_path, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-    print(f"Result saved to: {result_path}")
-    return result_filename
+def save_result_to_db(result: dict):
+    """Insert (or replace) an analysis result in the database."""
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO results_cache (file_hash, filename, result, processed_at)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (file_hash) DO UPDATE
+                    SET result       = EXCLUDED.result,
+                        processed_at = EXCLUDED.processed_at
+            """, (
+                result.get('file_hash'),
+                result.get('filename'),
+                json.dumps(result),
+                result.get('processed_at', datetime.now().isoformat())
+            ))
+        conn.commit()
+    print(f"Result saved to DB for file: {result.get('filename')}")
 
 
 def calculate_priority(entities, emotion):
@@ -176,7 +219,7 @@ def upload_files():
             result['alert_sent']       = alert_info.get('alert_sent', False)
             result['notified_centers'] = alert_info.get('matched_centers', [])
 
-            save_result_to_file(result, prefix=filename.rsplit('.', 1)[0])
+            save_result_to_db(result)
             results.append(result)
 
         except Exception as e:
@@ -186,8 +229,6 @@ def upload_files():
                 'error':        str(e),
                 'processed_at': datetime.now().isoformat()
             }
-            save_result_to_file(error_result,
-                                prefix=f"error_{filename.rsplit('.', 1)[0]}")
             results.append(error_result)
 
     results.sort(key=lambda x: x.get('priority', 999))
@@ -239,7 +280,7 @@ def record_audio():
         result['alert_sent']       = alert_info.get('alert_sent', False)
         result['notified_centers'] = alert_info.get('matched_centers', [])
 
-        save_result_to_file(result, prefix=f"recording_{timestamp}")
+        save_result_to_db(result)
         return jsonify(result)
 
     except Exception as e:
@@ -264,6 +305,5 @@ def geocode():
 
 if __name__ == '__main__':
     print(f"📁 Uploads folder : {UPLOAD_FOLDER}")
-    print(f"📁 Results folder : {RESULTS_FOLDER}")
     print(f"🔗 Response App   : {RESPONSE_APP_URL}")
     app.run(debug=True, port=5006, host='0.0.0.0')
